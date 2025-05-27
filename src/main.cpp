@@ -54,22 +54,32 @@ void setup(){
 
   uint8_t p0[]={0,0,100,0};
   sendPack(1,CMD_MOVE,p0,4);
+  sendPack(2,CMD_MOVE,p0,4);
   delay(500);
   uint8_t p90[]={0x77,0x01,100,0};
   sendPack(1,CMD_MOVE,p90,4);
+  sendPack(2,CMD_MOVE,p90,4);
 }
 
 void loop() {
   static bool dir = false;
+  uint8_t p0[] = { 0x00,0x00, 100,0x00 };
+  uint8_t p90[] = { 0x77,0x01, 100,0x00 };
 
   if (dir) {
-    uint8_t p0[] = { 0x00,0x00, 100,0x00 };
     sendPack(1, CMD_MOVE, p0, 4);
-    Serial.println("→ Move to 0°");
-  } else {
-    uint8_t p90[] = { 0x77,0x01, 100,0x00 };
+    Serial.println("Servo 1 → Move to 0°");
+    delay(500);
     sendPack(1, CMD_MOVE, p90, 4);
-    Serial.println("→ Move to 90°");
+    Serial.println("Servo 1 → Move to 90°");
+    delay(500);
+  } else {
+    sendPack(2, CMD_MOVE, p0, 4);
+    Serial.println("Servo 2 → Move to 0°");
+    delay(500);
+    sendPack(2, CMD_MOVE, p90, 4);
+    Serial.println("Servo 2 → Move to 90°");
+    delay(500);
   }
 
   dir = !dir;
