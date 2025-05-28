@@ -9,6 +9,9 @@
 #include <trajectory_msgs/msg/joint_trajectory.h>
 #include <trajectory_msgs/msg/joint_trajectory_point.h>
 
+// ======= 可調整舵機數量 =======
+#define NUM_SERVOS 12
+
 // ======= UART Bus Servo 設定 =======
 #define RX_PIN 18
 #define TX_PIN 19
@@ -17,31 +20,37 @@ HardwareSerial BusSerial(2);
 #define CMD_MOVE 0x01
 #define CMD_LOAD 0x1F
 
-uint8_t calcCHK(const uint8_t*b){
-  uint16_t s=0;
-  for(uint8_t i=2;i<b[3]+2;i++) s+=b[i];
+uint8_t calcCHK(const uint8_t *b) {
+  uint16_t s = 0;
+  for (uint8_t i = 2; i < b[3] + 2; i++) s += b[i];
   return ~s;
 }
-void sendPack(uint8_t id,uint8_t cmd,const uint8_t*p,uint8_t n){
-  uint8_t buf[6+n];
-  buf[0]=buf[1]=HDR;
-  buf[2]=id; buf[3]=n+3; buf[4]=cmd;
-  for(uint8_t i=0;i<n;i++) buf[5+i]=p[i];
-  buf[5+n]=calcCHK(buf);
-  BusSerial.write(buf,6+n);
+
+void sendPack(uint8_t id, uint8_t cmd, const uint8_t *p, uint8_t n) {
+  uint8_t buf[6 + n];
+  buf[0] = buf[1] = HDR;
+  buf[2] = id; 
+  buf[3] = n + 3;
+  buf[4] = cmd;
+  for (uint8_t i = 0; i < n; i++) buf[5 + i] = p[i];
+  buf[5 + n] = calcCHK(buf);
+  BusSerial.write(buf, 6 + n);
 }
-void enableTorque(uint8_t id){
-  uint8_t on=1; sendPack(id,CMD_LOAD,&on,1);
+
+void enableTorque(uint8_t id) {
+  uint8_t on = 1;
+  sendPack(id, CMD_LOAD, &on, 1);
 }
-void moveServoDeg(uint8_t id, float deg){
+
+void moveServoDeg(uint8_t id, float deg) {
   deg = constrain(deg, 0.0f, 240.0f);
-  uint16_t pos = (uint16_t)(deg/240.0f*1000.0f);
+  uint16_t pos = (uint16_t)(deg / 240.0f * 1000.0f);
   uint8_t p[4] = {
     (uint8_t)(pos & 0xFF),
     (uint8_t)(pos >> 8),
     0x64, 0x00    // 100 ms
   };
-  sendPack(id,CMD_MOVE,p,4);
+  sendPack(id, CMD_MOVE, p, 4);
 }
 
 // ======= micro-ROS 變數 =======
@@ -52,16 +61,15 @@ rclc_support_t             support;
 rcl_allocator_t            allocator;
 trajectory_msgs__msg__JointTrajectory traj_msg;
 
-// callback：取 points[0].positions 裡的前兩個值
+// callback：取 points[0].positions 裡的前 NUM_SERVOS 個值
 void traj_callback(const void * msgin) {
   auto *t = (const trajectory_msgs__msg__JointTrajectory *)msgin;
   if (t->points.size == 0) return;
-
   auto &pt = t->points.data[0];
-  size_t n = pt.positions.size < 2 ? pt.positions.size : 2;
+  size_t n = pt.positions.size < NUM_SERVOS ? pt.positions.size : NUM_SERVOS;
   Serial.printf("Got JointTrajectory, point0 with %u positions\n", (unsigned)n);
   for (size_t i = 0; i < n; i++) {
-    moveServoDeg(i+1, (float)pt.positions.data[i]);
+    moveServoDeg(i + 1, (float)pt.positions.data[i]);
   }
 }
 
@@ -69,8 +77,10 @@ void setup() {
   // 1. 序列埠 & 舵機初始化
   Serial.begin(115200);
   BusSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
-  enableTorque(1);
-  enableTorque(2);
+  for (uint8_t id = 1; id <= NUM_SERVOS; id++) {
+    enableTorque(id);
+    delay(20);
+  }
   delay(200);
 
   // 2. micro-ROS 初始化
@@ -82,19 +92,21 @@ void setup() {
   // 3. 建立並初始化 JointTrajectory 訊息
   trajectory_msgs__msg__JointTrajectory__init(&traj_msg);
 
-  // 3.1 joint_names 長度 2
-  rosidl_runtime_c__String__Sequence__init(&traj_msg.joint_names, 2);
-  rosidl_runtime_c__String__assign(&traj_msg.joint_names.data[0], "servo_1");
-  rosidl_runtime_c__String__assign(&traj_msg.joint_names.data[1], "servo_2");
+  // 3.1 joint_names 序列長度 NUM_SERVOS
+  rosidl_runtime_c__String__Sequence__init(&traj_msg.joint_names, NUM_SERVOS);
+  char tmp[16];
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    sprintf(tmp, "servo_%u", i + 1);
+    rosidl_runtime_c__String__assign(&traj_msg.joint_names.data[i], tmp);
+  }
 
   // 3.2 points 序列長度 1
   trajectory_msgs__msg__JointTrajectoryPoint__Sequence__init(&traj_msg.points, 1);
-  // positions 長度 2
+  // positions 動態分配 NUM_SERVOS
   traj_msg.points.data[0].positions.data =
-    (double*)malloc(2 * sizeof(double));
+    (double *)malloc(NUM_SERVOS * sizeof(double));
   traj_msg.points.data[0].positions.size =
-  traj_msg.points.data[0].positions.capacity = 2;
-  // time_from_start (可留 0)
+    traj_msg.points.data[0].positions.capacity = NUM_SERVOS;
   traj_msg.points.data[0].time_from_start.sec = 0;
   traj_msg.points.data[0].time_from_start.nanosec = 0;
 
