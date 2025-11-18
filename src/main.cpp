@@ -10,7 +10,7 @@
 #include <trajectory_msgs/msg/joint_trajectory_point.h>
 
 // ======= 可調整舵機數量 =======
-#define NUM_SERVOS 12
+#define NUM_SERVOS 18
 
 // ======= UART Bus Servo 設定 =======
 #define RX_PIN 18
@@ -42,15 +42,73 @@ void enableTorque(uint8_t id) {
   sendPack(id, CMD_LOAD, &on, 1);
 }
 
+// ==========================================================
+// ✔ S-curve smoothing 資料
+// ==========================================================
+float currentDeg[NUM_SERVOS] = {0};
+float startDeg[NUM_SERVOS]   = {0};
+float targetDeg[NUM_SERVOS]  = {0};
+bool  moving[NUM_SERVOS]     = {false};
+
+float T_total = 0.5f;    // 移動總時間 0.5 秒
+float dt      = 0.02f;   // 每 20ms 更新一次
+
+TaskHandle_t motionTaskHandle = NULL;
+
+float s_curve(float a0, float a1, float t, float T) {
+  float d = a1 - a0;
+  return a0 + 0.5f * d * (1 - cos(PI * t / T));
+}
+
+// ==========================================================
+// ✔ 非阻塞背景絲滑 task（修正版）
+// ==========================================================
+void MotionTask(void *p) {
+  static float t[NUM_SERVOS] = {0};
+
+  for (;;) {
+
+    for (int id = 0; id < NUM_SERVOS; id++) {
+
+      if (!moving[id]) continue;  // 該 servo 沒有要動
+
+      t[id] += dt;
+      if (t[id] > T_total) t[id] = T_total;
+
+      // S-curve 計算
+      float deg = s_curve(startDeg[id], targetDeg[id], t[id], T_total);
+      currentDeg[id] = deg;
+
+      // output to servo
+      uint16_t pos = (uint16_t)(deg / 240.0f * 1000.0f);
+      uint8_t pbuf[4] = {
+        (uint8_t)(pos & 0xFF),
+        (uint8_t)(pos >> 8),
+        0x64, 0x00
+      };
+      sendPack(id + 1, CMD_MOVE, pbuf, 4);
+
+      // 完成
+      if (t[id] >= T_total) {
+        currentDeg[id] = targetDeg[id];
+        moving[id] = false;
+        t[id] = 0;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20)); // 非阻塞
+  }
+}
+
+// ==========================================================
+// ✔ 改動：moveServoDeg → 設 target，不直接動舵機
+// ==========================================================
 void moveServoDeg(uint8_t id, float deg) {
-  deg = constrain(deg, 0.0f, 240.0f);
-  uint16_t pos = (uint16_t)(deg / 240.0f * 1000.0f);
-  uint8_t p[4] = {
-    (uint8_t)(pos & 0xFF),
-    (uint8_t)(pos >> 8),
-    0x64, 0x00    // 100 ms
-  };
-  sendPack(id, CMD_MOVE, p, 4);
+  uint8_t idx = id - 1;
+  targetDeg[idx] = constrain(deg, 0.0f, 240.0f);
+
+  startDeg[idx]  = currentDeg[idx];   // 固定此段 S-curve 起點
+  moving[idx]    = true;              // 啟動該軸運動
 }
 
 // ======= micro-ROS 變數 =======
@@ -61,38 +119,44 @@ rclc_support_t             support;
 rcl_allocator_t            allocator;
 trajectory_msgs__msg__JointTrajectory traj_msg;
 
-// callback：取 points[0].positions 裡的前 NUM_SERVOS 個值
+// callback：取 positions
 void traj_callback(const void * msgin) {
   auto *t = (const trajectory_msgs__msg__JointTrajectory *)msgin;
   if (t->points.size == 0) return;
+
   auto &pt = t->points.data[0];
   size_t n = pt.positions.size < NUM_SERVOS ? pt.positions.size : NUM_SERVOS;
-  Serial.printf("Got JointTrajectory, point0 with %u positions\n", (unsigned)n);
+
+  Serial.printf("Got JointTrajectory point with %u positions\n", (unsigned)n);
+
   for (size_t i = 0; i < n; i++) {
     moveServoDeg(i + 1, (float)pt.positions.data[i]);
   }
 }
 
 void setup() {
-  // 1. 序列埠 & 舵機初始化
+  // ===== 1. 序列埠 & 舵機初始化 =====
   Serial.begin(115200);
   BusSerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
+
   for (uint8_t id = 1; id <= NUM_SERVOS; id++) {
     enableTorque(id);
     delay(20);
   }
   delay(200);
 
-  // 2. micro-ROS 初始化
+  // ===== 2. 啟動絲滑背景 task =====
+  xTaskCreatePinnedToCore(
+    MotionTask, "motion", 4096, NULL, 1, &motionTaskHandle, 1);
+
+  // ===== 3. micro-ROS 初始化 =====
   set_microros_serial_transports(Serial);
   allocator = rcl_get_default_allocator();
   rclc_support_init(&support, 0, NULL, &allocator);
   rclc_node_init_default(&node, "servo_node", "", &support);
 
-  // 3. 建立並初始化 JointTrajectory 訊息
   trajectory_msgs__msg__JointTrajectory__init(&traj_msg);
 
-  // 3.1 joint_names 序列長度 NUM_SERVOS
   rosidl_runtime_c__String__Sequence__init(&traj_msg.joint_names, NUM_SERVOS);
   char tmp[16];
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
@@ -100,24 +164,21 @@ void setup() {
     rosidl_runtime_c__String__assign(&traj_msg.joint_names.data[i], tmp);
   }
 
-  // 3.2 points 序列長度 1
   trajectory_msgs__msg__JointTrajectoryPoint__Sequence__init(&traj_msg.points, 1);
-  // positions 動態分配 NUM_SERVOS
   traj_msg.points.data[0].positions.data =
     (double *)malloc(NUM_SERVOS * sizeof(double));
   traj_msg.points.data[0].positions.size =
     traj_msg.points.data[0].positions.capacity = NUM_SERVOS;
+
   traj_msg.points.data[0].time_from_start.sec = 0;
   traj_msg.points.data[0].time_from_start.nanosec = 0;
 
-  // 4. 訂閱 /servo_trajectory
   rclc_subscription_init_default(
     &subscription, &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(trajectory_msgs, msg, JointTrajectory),
     "/servo_trajectory"
   );
 
-  // 5. Executor
   rclc_executor_init(&executor, &support.context, 1, &allocator);
   rclc_executor_add_subscription(
     &executor, &subscription, &traj_msg,
@@ -126,6 +187,5 @@ void setup() {
 }
 
 void loop() {
-  // 每 10 ms spin 一次
   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 }
