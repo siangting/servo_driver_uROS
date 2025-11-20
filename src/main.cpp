@@ -150,9 +150,22 @@ void setup() {
     MotionTask, "motion", 4096, NULL, 1, &motionTaskHandle, 1);
 
   // ===== 3. micro-ROS 初始化 =====
-  set_microros_serial_transports(Serial);
+set_microros_serial_transports(Serial);
   allocator = rcl_get_default_allocator();
-  rclc_support_init(&support, 0, NULL, &allocator);
+
+  // 1. 初始化 rcl_init_options_t
+  rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+  rcl_init_options_init(&init_options, allocator);
+
+  // 2. 🌟 設定 ROS_DOMAIN_ID 為 1 🌟
+  rcl_init_options_set_domain_id(&init_options, 1); 
+
+  // 3. 使用 init_options 初始化 support (使用 rclc_support_init_with_options)
+  rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator); 
+  
+  // 4. 釋放 init_options
+  rcl_init_options_fini(&init_options);
+  // ===== 4. 建立 node、subscription、executor =====
   rclc_node_init_default(&node, "servo_node", "", &support);
 
   trajectory_msgs__msg__JointTrajectory__init(&traj_msg);
